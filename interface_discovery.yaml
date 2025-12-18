@@ -1,0 +1,126 @@
+# Copyright (c) 2025 Arista Networks, Inc.
+# Use of this source code is governed by the Apache License 2.0
+# that can be found in the LICENSE file.
+#
+# Interface Discovery Components for CV Job Informer
+# - NodeInterfaceState CRD: Stores network interface information per node
+# - cv-interface-discovery DaemonSet: Discovers interfaces on each node
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: nodeinterfacestates.cloudvision.arista.io
+spec:
+  group: cloudvision.arista.io
+  names:
+    kind: NodeInterfaceState
+    listKind: NodeInterfaceStateList
+    plural: nodeinterfacestates
+    singular: nodeinterfacestate
+  scope: Namespaced
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+          status:
+            type: object
+            properties:
+              interfaces:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                      description: Interface name (PF)
+                    mac:
+                      type: string
+                      description: MAC address
+                    ip:
+                      type: string
+                      description: IP address
+                    pciAddress:
+                      type: string
+                      description: PCI address
+                    rdmaDevice:
+                      type: string
+                      description: RDMA device name (e.g., mlx5_0)
+                    totalvfs:
+                      type: integer
+                      description: Total number of VFs supported
+                    numVfs:
+                      type: integer
+                      description: Number of configured VFs
+                    Vfs:
+                      type: array
+                      description: List of Virtual Functions
+                      items:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                            description: VF interface name
+                          mac:
+                            type: string
+                            description: VF MAC address
+                          ip:
+                            type: string
+                            description: VF IP address
+                          pciAddress:
+                            type: string
+                            description: VF PCI address
+                          rdmaDevice:
+                            type: string
+                            description: VF RDMA device name
+              syncStatus:
+                type: string
+                description: Sync status (Succeeded, Failed, etc.)
+    subresources:
+      status: {}
+    additionalPrinterColumns:
+    - name: Sync Status
+      type: string
+      jsonPath: .status.syncStatus
+    - name: Age
+      type: date
+      jsonPath: .metadata.creationTimestamp
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cv-interface-discovery
+  namespace: cloudvision
+  labels:
+    app: cv-interface-discovery
+spec:
+  selector:
+    matchLabels:
+      app: cv-interface-discovery
+  template:
+    metadata:
+      labels:
+        app: cv-interface-discovery
+    spec:
+      serviceAccountName: cv-job-informer
+      hostNetwork: true
+      containers:
+      - name: interface-discovery
+        image: cloudvision-job-kubernetes:latest
+        imagePullPolicy: Always
+        command: ["python3", "interface_discovery.py"]
+        securityContext:
+          privileged: true
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: LOG_LEVEL
+          value: "info"

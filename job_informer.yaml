@@ -1,0 +1,185 @@
+---
+# ServiceAccount for cv-job-informer
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cv-job-informer
+  namespace: cloudvision
+---
+# ClusterRole with permissions to watch jobs, pods, and SR-IOV node states
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cv-job-informer
+rules:
+# Permissions for Nodes
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list"]
+# Permissions for Pods
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+# Permissions for Kubernetes batch Jobs
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch"]
+# Permissions for JobSet (Kubernetes SIG)
+- apiGroups: ["jobset.x-k8s.io"]
+  resources: ["jobsets"]
+  verbs: ["get", "list", "watch"]
+# Permissions for Kubeflow Training Operator
+- apiGroups: ["kubeflow.org"]
+  resources: ["pytorchjobs", "tfjobs", "mpijobs", "xgboostjobs", "paddlejobs"]
+  verbs: ["get", "list", "watch"]
+# Permissions for TrainJob CRD (Kubeflow Trainer v2)
+- apiGroups: ["trainer.kubeflow.org"]
+  resources: ["trainjobs"]
+  verbs: ["get", "list", "watch"]
+# Permissions for Argo Workflows
+- apiGroups: ["argoproj.io"]
+  resources: ["workflows", "workflowtemplates", "cronworkflows"]
+  verbs: ["get", "list", "watch"]
+# Permissions for Run:ai Workloads
+- apiGroups: ["run.ai"]
+  resources: ["runaijobs", "trainings", "inferences", "interactives"]
+  verbs: ["get", "list", "watch"]
+# Permissions for Volcano batch scheduler
+- apiGroups: ["batch.volcano.sh"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch"]
+# Permissions for Ray (KubeRay)
+- apiGroups: ["ray.io"]
+  resources: ["rayjobs", "rayclusters"]
+  verbs: ["get", "list", "watch"]
+# Permissions for NodeInterfaceState CRs (cv-interface-discovery)
+- apiGroups: ["cloudvision.arista.io"]
+  resources: ["nodeinterfacestates"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: ["cloudvision.arista.io"]
+  resources: ["nodeinterfacestates/status"]
+  verbs: ["get", "update", "patch"]
+# Permissions for SR-IOV Network Node States (SR-IOV Operator fallback)
+- apiGroups: ["sriovnetwork.openshift.io"]
+  resources: ["sriovnetworknodestates"]
+  verbs: ["get", "list", "watch"]
+---
+# ClusterRoleBinding to bind the cluster role to the service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cv-job-informer
+subjects:
+- kind: ServiceAccount
+  name: cv-job-informer
+  namespace: cloudvision
+roleRef:
+  kind: ClusterRole
+  name: cv-job-informer
+  apiGroup: rbac.authorization.k8s.io
+---
+---
+# Deployment for cv-job-informer
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cv-job-informer
+  namespace: cloudvision
+  labels:
+    app: cv-job-informer
+spec:
+  replicas: 1  # Only run one instance to avoid duplicate monitoring
+  selector:
+    matchLabels:
+      app: cv-job-informer
+  template:
+    metadata:
+      labels:
+        app: cv-job-informer
+    spec:
+      serviceAccountName: cv-job-informer
+      # Run on control plane node to avoid image distribution issues
+      # and because we only need one instance monitoring the API server
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      # Allow scheduling on control plane (some clusters taint control plane nodes)
+      tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: cv-job-informer
+        image: cloudvision-job-kubernetes:latest
+        imagePullPolicy: Always
+        # Command-line arguments - use env var substitution for configurability
+        args:
+        - --namespace
+        - "$(NAMESPACE)"
+        - --log-level
+        - "$(LOG_LEVEL)"
+        - --api-server
+        - "$(API_SERVER)"
+        - --api-token
+        - "$(API_TOKEN)"
+        - --location
+        - "$(LOCATION)"
+        - --jobconfig-mode
+        - "$(JOBCONFIG_MODE)"
+        - --nodeconfig-mode
+        - "$(NODECONFIG_MODE)"
+        - --node-interface-type
+        - "$(NODE_INTERFACE_TYPE)"
+        env:
+        - name: NAMESPACE
+          # Namespace(s) to monitor for jobs. Options:
+          # - Empty string "" = watch ALL namespaces cluster-wide (default)
+          # - Single namespace, e.g. "training" = watch only that namespace
+          # - Comma-separated list, e.g. "ns1,ns2,ns3" = watch all namespaces but filter to specified ones
+          value: ""
+        - name: LOG_LEVEL
+          value: "info"
+        - name: API_SERVER
+          valueFrom:
+            secretKeyRef:
+              name: cv-job-informer-api-credentials
+              key: api-server
+        - name: API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: cv-job-informer-api-credentials
+              key: api-token
+        - name: LOCATION
+          # REQUIRED: Location identifier for API calls (e.g., cluster name)
+          value: ""
+        - name: JOBCONFIG_MODE
+          value: "interface"  # Options: "node" (dedicated nodes) or "interface" (shared nodes)
+        - name: NODECONFIG_MODE
+          value: "discovery"  # NodeConfig mode: discovery, sriovoperator, or disabled. Default: discovery
+        - name: NODE_INTERFACE_TYPE
+          value: "all"  # Which node interfaces to send: all, pf, or vf
+        volumeMounts:
+        - name: logs
+          mountPath: /logs
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        # Security context for non-root execution
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: logs
+        emptyDir: {}
+      restartPolicy: Always
