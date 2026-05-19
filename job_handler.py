@@ -600,7 +600,9 @@ class JobEventHandler:
                                 'CANCELLED',
                                 job_uid=tracked_job.job_key,
                                 start_time=start_time,
-                                end_time=end_time)
+                                end_time=end_time,
+                                fallback_interfaces=list(
+                                    tracked_job.sent_interfaces))
 
             # Remove from tracking
             with self.monitor.tracked_jobs_lock:

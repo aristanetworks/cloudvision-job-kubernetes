@@ -476,7 +476,8 @@ class JobMonitor:
                           termination_reason: Optional[str] = None,
                           job_uid: str = None,
                           start_time: Optional[str] = None,
-                          end_time: Optional[str] = None):
+                          end_time: Optional[str] = None,
+                          fallback_interfaces: Optional[List[str]] = None):
         """Process job event: send to CloudVision API and log details"""
 
         # Filter to only include pods with valid info (node assigned)
@@ -485,7 +486,7 @@ class JobMonitor:
         # Send job data to API
         self._send_job_event_to_api(event_type, job_name, valid_pods,
                                     termination_reason, job_uid, start_time,
-                                    end_time)
+                                    end_time, fallback_interfaces)
 
         # Log human-readable summary
         if event_type == 'STARTED':
@@ -544,7 +545,8 @@ class JobMonitor:
                                valid_pods: List[PodInfo],
                                termination_reason: Optional[str], job_uid: str,
                                start_time: Optional[str],
-                               end_time: Optional[str]):
+                               end_time: Optional[str],
+                               fallback_interfaces: Optional[List[str]] = None):
         """
         Send job event to JobConfig API
 
@@ -556,6 +558,8 @@ class JobMonitor:
             job_uid: Job UID from CRD metadata - used as unique job_id for API
             start_time: Job start time (ISO format) - when job started running
             end_time: Job end time (ISO format) - when job finished/cancelled
+            fallback_interfaces: Interface MACs to use if none can be extracted
+                                 from pods (e.g. CNI teardown stripped annotations)
         """
         # Skip if API is not configured
         if not constants.API_SERVER or not constants.API_TOKEN:
@@ -571,6 +575,11 @@ class JobMonitor:
             for pod in valid_pods
             for iface in pod.network_interfaces if iface.mac
         })
+
+        # Fall back to previously-sent interfaces if CNI teardown has already
+        # stripped the network-status annotation from the pod objects
+        if not interfaces and fallback_interfaces:
+            interfaces = list(fallback_interfaces)
 
         # Determine job state based on event type using mapping dictionaries
         if event_type in EVENT_TYPE_TO_JOB_STATE:
