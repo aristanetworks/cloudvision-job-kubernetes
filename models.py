@@ -18,6 +18,11 @@ from kubernetes import client
 
 logger = logging.getLogger(__name__)
 
+SUCCESS_STATUS_VALUES = {'complete', 'completed', 'succeeded', 'jobcomplete'}
+FAIL_STATUS_VALUES = {
+    'failed', 'jobfailed', 'error', 'nodeadline', 'aborted', 'terminated'
+}
+
 # ============================================================================
 # Data Classes
 # ============================================================================
@@ -130,6 +135,20 @@ class DynamicResourceConfig:
         else:
             return lower + 's'
 
+    @staticmethod
+    def _normalize_status_value(value) -> str:
+        """Normalize status values that may be strings or nested status objects."""
+        if value is None:
+            return ''
+        if isinstance(value, dict):
+            for key in ('phase', 'state', 'status', 'type'):
+                normalized = DynamicResourceConfig._normalize_status_value(
+                    value.get(key))
+                if normalized:
+                    return normalized
+            return ''
+        return str(value).lower()
+
     @property
     def name(self) -> str:
         """Human-readable name of the resource type"""
@@ -180,31 +199,34 @@ class DynamicResourceConfig:
         # 1. Check Conditions (Most reliable for K8s Jobs, JobSets)
         conditions = status.get('conditions', [])
 
-        success_condition_types = {
-            'complete', 'completed', 'succeeded', 'jobcomplete'
-        }
-        fail_condition_types = {'failed', 'jobfailed', 'error'}
-
         for condition in conditions:
-            cond_type = condition.get('type', '').lower()
-            cond_status = str(condition.get('status', '')).lower()
+            if not isinstance(condition, dict):
+                continue
+
+            cond_type = self._normalize_status_value(condition.get('type'))
+            cond_status = self._normalize_status_value(
+                condition.get('status'))
 
             if cond_status == 'true':
-                if cond_type in success_condition_types:
+                if cond_type in SUCCESS_STATUS_VALUES:
                     return (True, True, False)
-                if cond_type in fail_condition_types:
+                if cond_type in FAIL_STATUS_VALUES:
+                    return (True, False, True)
+
+            if not cond_type:
+                if cond_status in SUCCESS_STATUS_VALUES:
+                    return (True, True, False)
+                if cond_status in FAIL_STATUS_VALUES:
                     return (True, False, True)
 
         # 2. Check Phase/State (Most reliable for Argo, Spark, Pods)
-        phase = status.get('phase') or status.get('state') or ''
-        phase = phase.lower()
+        phase = self._normalize_status_value(status.get('phase'))
+        if not phase:
+            phase = self._normalize_status_value(status.get('state'))
 
-        success_phases = {'succeeded', 'completed', 'complete'}
-        fail_phases = {'failed', 'error', 'nodeadline'}
-
-        if phase in success_phases:
+        if phase in SUCCESS_STATUS_VALUES:
             return (True, True, False)
-        if phase in fail_phases:
+        if phase in FAIL_STATUS_VALUES:
             return (True, False, True)
 
         return (False, False, False)

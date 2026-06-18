@@ -92,18 +92,26 @@ class CustomResourceInformer:
 
             # Process each job through handlers (with filtering if needed)
             processed_count = 0
+            error_count = 0
             for job_obj in job_items:
-                if self._should_process_job(job_obj):
-                    if 'add' in self.handlers:
-                        self.handlers['add'](job_obj, is_initial_sync=True)
-                    processed_count += 1
+                try:
+                    if self._should_process_job(job_obj):
+                        if 'add' in self.handlers:
+                            self.handlers['add'](job_obj,
+                                                 is_initial_sync=True)
+                        processed_count += 1
+                except Exception:
+                    error_count += 1
+                    logger.exception(
+                        "Error processing %s during initial sync: %s",
+                        self.config.type_key, job_obj)
 
             logger.info(
-                f"[SYNC] {self.config.name} synced: {processed_count} jobs processed"
+                f"[SYNC] {self.config.name} synced: {processed_count} jobs processed, {error_count} errors"
             )
             self.initial_sync_done = True
         except Exception as e:
-            logger.error(f"Error syncing {self.config.name}: {e}")
+            logger.exception(f"Error syncing {self.config.name}: {e}")
 
     def _watch_loop(self):
         """Main watch loop with automatic reconnection"""
@@ -147,30 +155,39 @@ class CustomResourceInformer:
                     if not self.running:
                         break
 
-                    event_type = event['type']
-                    job_obj = event['object']
+                    try:
+                        event_type = event['type']
+                        job_obj = event['object']
 
-                    # Apply namespace filtering
-                    if not self._should_process_job(job_obj):
-                        continue
+                        # Apply namespace filtering
+                        if not self._should_process_job(job_obj):
+                            continue
 
-                    job_key = self.config.get_job_key(job_obj)
+                        job_key = self.config.get_job_key(job_obj)
 
-                    if not job_key:
-                        continue  # Skip jobs without valid job key
+                        if not job_key:
+                            continue  # Skip jobs without valid job key
 
-                    # Trigger handlers (handlers maintain their own state)
-                    if event_type == 'ADDED':
-                        if 'add' in self.handlers:
-                            self.handlers['add'](job_obj)
+                        # Trigger handlers (handlers maintain their own state)
+                        if event_type == 'ADDED':
+                            if 'add' in self.handlers:
+                                self.handlers['add'](job_obj)
 
-                    elif event_type == 'MODIFIED':
-                        if 'update' in self.handlers:
-                            self.handlers['update'](job_obj)
+                        elif event_type == 'MODIFIED':
+                            if 'update' in self.handlers:
+                                self.handlers['update'](job_obj)
 
-                    elif event_type == 'DELETED':
-                        if 'delete' in self.handlers:
-                            self.handlers['delete'](job_obj)
+                        elif event_type == 'DELETED':
+                            if 'delete' in self.handlers:
+                                self.handlers['delete'](job_obj)
+                    except Exception:
+                        event_type = event.get('type', '<missing>') if isinstance(
+                            event, dict) else '<invalid>'
+                        job_obj = event.get('object') if isinstance(
+                            event, dict) else event
+                        logger.exception(
+                            "Error processing %s watch event %s: %s",
+                            self.config.type_key, event_type, job_obj)
 
                 if self.running:
                     logger.debug(
