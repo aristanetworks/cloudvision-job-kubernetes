@@ -7,54 +7,50 @@ A Kubernetes integration that monitors jobs and reports job lifecycle events and
 
 ```mermaid
 graph TD
-    %% CloudVision at top
     cv[CloudVision]
 
-    %% Main components
-    informer[cv-job-informer<br/>deployment]
-    discovery[cv-interface-discovery<br/>daemonset<br/>optional]
+    informer["cv-job-informer<br/>deployment"]
 
-    %% Kubernetes resources
-    jobs[Job CRDs<br/>dynamically discovered]
-    pods[Pods<br/>with network annotations]
+    subgraph k8s_api["Kubernetes API objects"]
+        jobs["Job CRDs<br/>dynamically discovered"]
+        pods[Pods]
+        claims["ResourceClaims<br/>DRA optional"]
+        crs["Node interface state CRs<br/>NodeInterfaceState · SriovNetworkNodeState"]
+    end
 
-    %% Node state CRs - two modes
-    node_states[NodeInterfaceState CRs<br/>mode: discovery]
-    sriov_states[SriovNetworkNodeState CRs<br/>mode: sriovoperator]
+    discovery["cv-interface-discovery<br/>daemonset<br/>optional"]
 
-    %% Optional operator
-    sriov_op[SR-IOV Network Operator<br/>optional alternative]
+    subgraph cluster_software["Existing cluster software"]
+        multus["Multus CNI<br/>optional"]
+        sriov_op["SR-IOV Network Operator<br/>optional alternative"]
+    end
 
-    %% CNI plugins
-    multus[Multus CNI]
-
-    %% Flows - Job monitoring
+    %% Job monitoring: the informer watches workloads and their network attachments
     jobs -->|watch| informer
     pods -->|watch| informer
+    claims -->|watch| informer
+    pods -.->|"may reference"| claims
     multus -.->|annotates| pods
 
-    %% Flows - NodeConfig mode: discovery
-    discovery -.->|creates| node_states
-    node_states -->|watch| informer
+    %% Node interface inventory: two alternative modes feed a single watch
+    discovery -.->|"creates · mode: discovery"| crs
+    sriov_op -.->|"creates · mode: sriovoperator"| crs
+    crs -->|watch| informer
 
-    %% Flows - NodeConfig mode: sriovoperator
-    sriov_op -.->|creates| sriov_states
-    sriov_states -->|watch| informer
+    %% Reporting: two CloudVision APIs, two flows
+    informer -->|"JobConfig API"| cv
+    informer -->|"NodeConfig API"| cv
 
-    %% Flows - to CloudVision
-    informer -->|JobConfig API<br/>job events| cv
-    informer -->|NodeConfig API<br/>node inventory| cv
-
-    %% Styling
-    style cv fill:#fff4e6,stroke:#ff9800,stroke-width:3px
-    style informer fill:#e1f5ff,stroke:#0066cc,stroke-width:2px
-    style discovery fill:#e1f5ff,stroke:#0066cc,stroke-width:2px,stroke-dasharray: 5 5
-    style jobs fill:#e8f5e9,stroke:#4caf50,stroke-width:2px
-    style pods fill:#e8f5e9,stroke:#4caf50,stroke-width:2px
-    style node_states fill:#e8f5e9,stroke:#4caf50,stroke-width:2px
-    style sriov_states fill:#e8f5e9,stroke:#4caf50,stroke-width:2px
-    style multus fill:#f3e5f5,stroke:#9c27b0
-    style sriov_op fill:#fff3e0,stroke:#ff6f00,stroke-dasharray: 5 5
+    %% Styling: one focal accent, neutral fills, dashed = optional
+    classDef focal fill:#eb6c361f,stroke:#eb6c36,stroke-width:1.5px
+    classDef neutral fill:#7f8ca114,stroke:#7a8399
+    classDef store fill:#7f8ca129,stroke:#7a8399
+    classDef optional fill:#7f8ca10a,stroke:#7a8399,stroke-dasharray:5 5
+    class informer focal
+    class cv neutral
+    class jobs,pods neutral
+    class crs store
+    class claims,multus,sriov_op,discovery optional
 ```
 
 ## How It Works
@@ -64,7 +60,7 @@ The integration consists of two major components:
 ### **cv-job-informer (deployment) monitors jobs**
 1. **Watches for Jobs**: Uses Kubernetes informer pattern with dynamic resource discovery based on pod's **ownerReferences** to watch any job type (TrainJob, PyTorchJob, MPIJob, etc.) in real-time
 2. **Tracks Lifecycle**: Detects when jobs start and finish (or fail)
-3. **Extracts Network Info**: Reads secondary network interface details from Multus CNI annotations (MAC addresses) on job pods. Only secondary interfaces are reported because primary interface (eth0) is not used for RDMA traffic in HPC jobs.
+3. **Extracts Network Info**: Collects MAC addresses of secondary (RDMA) NICs allocated to job pods. In `JOBCONFIG_MODE=interface`, MACs come from Kubernetes Dynamic Resource Allocation (ResourceClaim device status) and/or Multus CNI `network-status` annotations. Duplicate MACs from both sources are reported once. The primary interface (eth0) is not reported; HPC RDMA traffic does not use it.
 4. **Reports Job Events to CloudVision**: Sends job lifecycle changes to the JobConfig API with job metadata and network information
 5. **Reports Node Interface Inventory to CloudVision**: Watches NodeInterfaceState CRs (from cv-interface-discovery daemonset) or SriovNetworkNodeState CRs (from SR-IOV Network Operator) and sends node-level interface inventory to the NodeConfig API
 
@@ -85,8 +81,8 @@ The service extracts resource allocation info from pods and sends it to CloudVis
 
 | Mode | When to Use | What Gets Sent | Requirements |
 |------|-------------|----------------|--------------|
-| **`interface`** (default) | Nodes are shared between multiple jobs (each job uses specific interfaces) | List of interface MAC addresses from Multus CNI `network-status` annotation | Multus CNI (or equivalent) to attach secondary network interfaces |
-| **`node`** | Each node is exclusively used by a single job (all interfaces on the node belong to the job) | List of node names from pod `spec.nodeName` | None - works with any Kubernetes cluster |
+| **`interface`** (default) | Nodes are shared between jobs; each job uses a subset of NICs | MAC addresses of the NICs allocated to the job | Multus CNI, DRA ResourceClaims, or both (see Dependencies) |
+| **`node`** | Each node is exclusive to one job (every NIC on the node belongs to that job) | Node names from pod `spec.nodeName` | None — works with any Kubernetes cluster |
 
 **How CloudVision Uses This Data:**
 - **Interface mode**: Learns exact switch interfaces used by the job via MAC address correlation
@@ -108,11 +104,13 @@ The CV Job Informer reports network interface inventory from each node to CloudV
 ### Dependencies
 
 - **Kubernetes cluster** >= 1.20
-- **Job Operator** - Any job operator that creates pods with ownerReferences
-- **[Multus CNI](https://github.com/k8snetworkplumbingwg/multus-cni)** - CNI meta‑plugin that attaches secondary network interfaces to pods for high-speed RDMA communications
-  - Works with any RDMA NIC resource allocation mechanism: SR-IOV Device Plugin, DRA (Dynamic Resource Allocation), RDMA Shared Device Plugin with MACVLAN, etc.
-  - **Required only when `JOBCONFIG_MODE=interface`** for reporting interface-level resource allocation
-  - **Not required when `JOBCONFIG_MODE=node`** (reports node-level allocation instead)
+- **Job Operator** — any operator that creates pods with `ownerReferences` (TrainJob, PyTorchJob, JobSet, and the types listed below)
+- **Secondary NIC visibility** — required only for `JOBCONFIG_MODE=interface`. Provide at least one of:
+  - **[Multus CNI](https://github.com/k8snetworkplumbingwg/multus-cni)** — annotates pods with secondary interface MAC addresses (`k8s.v1.cni.cncf.io/network-status`). Typical with SR-IOV Device Plugin, RDMA shared device plugin, or MACVLAN.
+  - **[Dynamic Resource Allocation (DRA)](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/)** — ResourceClaims whose device driver publishes network device status (interface name, MAC address, IP). Supported when the cluster exposes `resource.k8s.io` ResourceClaims (stable `v1` since Kubernetes 1.34; earlier DRA API versions are used automatically if `v1` is not present). Kubernetes 1.37 [DRA extended resources](https://kubernetes.io/docs/tasks/configure-pod-container/extended-resource/) are supported: pods may request devices as extended resources without listing a ResourceClaim in the pod spec.
+- **Not required for `JOBCONFIG_MODE=node`** — that mode reports node names only.
+
+Clusters that use both Multus and DRA are supported. Clusters with neither DRA ResourceClaims nor Multus secondary-network annotations cannot report per-interface MACs; use `JOBCONFIG_MODE=node` instead.
 
 ### Deploy to Kubernetes
 
@@ -174,7 +172,7 @@ The deployment creates the following Kubernetes resources:
 
 1. **Namespace**: `cloudvision` (created automatically if it doesn't exist)
 2. **ServiceAccount**: `cv-job-informer` (in `cloudvision` namespace)
-3. **ClusterRole**: `cv-job-informer` (cluster-wide permissions to watch jobs, pods, nodes, and node interface states)
+3. **ClusterRole**: `cv-job-informer` (cluster-wide read access to jobs, pods, ResourceClaims, nodes, and node interface states)
 4. **ClusterRoleBinding**: `cv-job-informer` (binds the ClusterRole to the ServiceAccount)
 5. **Secret**: `cv-job-informer-api-credentials` (stores API server URL and authentication token)
 6. **Deployment**: `cv-job-informer` (runs 1 replica on the control plane node)
@@ -232,6 +230,7 @@ Variables:
 ```mermaid
 sequenceDiagram
     participant K8s as Kubernetes API
+    participant ClaimInformer as ResourceClaim Informer
     participant PodInformer as Pod Informer
     participant JobInformer as Job Informer(s)<br/>(Dynamic)
     participant NodeInformer as Node Informer
@@ -255,14 +254,14 @@ sequenceDiagram
 
     K8s->>PodInformer: Pod UPDATE (Running)
     PodInformer->>PodHandler: on_pod_update(pod)
-    PodHandler->>PodHandler: Extract network interfaces<br/>from Multus annotation
+    PodHandler->>PodHandler: Collect NIC MACs from<br/>ResourceClaims and/or Multus
     PodHandler->>PodHandler: Check pod states<br/>(Pending/Failed/Running)
 
     alt Any pod Pending or Failed
         PodHandler->>PodHandler: Skip STARTED event<br/>Wait for all pods to start<br/>or job to complete
     else All pods Running
         PodHandler->>PodHandler: Schedule STARTED event<br/>(stability delay)
-        Note over PodHandler: Wait for pod state<br/>to stabilize<br/>(5s delay)
+        Note over PodHandler: Wait for pod state<br/>to stabilize<br/>(10s delay)
         PodHandler->>PodHandler: Re-check: All pods running?<br/>No pending/failed pods?<br/>Interfaces stable?
         PodHandler->>CV: POST JobConfig<br/>state=STARTED<br/>interfaces=[MACs]
         PodHandler->>JobHandler: Update job status<br/>to RUNNING
@@ -274,6 +273,10 @@ sequenceDiagram
     PodInformer->>PodHandler: on_pod_update(pod)
     PodHandler->>PodHandler: Detect interface change
     PodHandler->>PodHandler: Schedule UPDATE event<br/>(stability delay)
+    PodHandler->>CV: POST JobConfig<br/>state=UPDATE<br/>interfaces=[new MACs]
+
+    K8s->>ClaimInformer: ResourceClaim UPDATE<br/>(device status / MAC)
+    ClaimInformer->>PodHandler: Schedule UPDATE event<br/>for jobs using the claim
     PodHandler->>CV: POST JobConfig<br/>state=UPDATE<br/>interfaces=[new MACs]
 
     Note over K8s,CV: 4. Job Completion
@@ -318,12 +321,13 @@ sequenceDiagram
 
 **What cv-job-informer monitors**
 
-- **Job CRDs** (any type: TrainJob, PyTorchJob, MPIJob, etc.) - for job lifecycle events via dynamic resource discovery based on pod's ownerReferences
-- **Pods** - for job resource allocation:
-  - Node names (which nodes are running the job)
-  - Network interface MAC addresses (from Multus CNI annotations)
-- **NodeInterfaceState CRs** (when `NODECONFIG_MODE=discovery`) - for node-level interface inventory created by cv-interface-discovery daemonset
-- **SriovNetworkNodeState CRs** (when `NODECONFIG_MODE=sriovoperator`) - for node-level SR-IOV interface inventory created by [SR-IOV Network Operator](https://github.com/k8snetworkplumbingwg/sriov-network-operator)
+- **Job CRDs** (any type: TrainJob, PyTorchJob, MPIJob, etc.) — job lifecycle events, discovered from pod `ownerReferences`
+- **Pods** — job resource allocation:
+  - Node names (which nodes run the job)
+  - Network interface MAC addresses (see below)
+- **ResourceClaims** (`resource.k8s.io`) — DRA-allocated NIC MAC, IP, and interface name from driver-reported device status. If the ResourceClaim API is not installed, this watch is skipped and the rest of the informer continues normally.
+- **NodeInterfaceState CRs** (when `NODECONFIG_MODE=discovery`) — node-level interface inventory created by the cv-interface-discovery daemonset
+- **SriovNetworkNodeState CRs** (when `NODECONFIG_MODE=sriovoperator`) — node-level SR-IOV inventory created by [SR-IOV Network Operator](https://github.com/k8snetworkplumbingwg/sriov-network-operator)
 
 **Supported Job Resource Types:**
 
@@ -363,26 +367,34 @@ To monitor additional job resource types:
 
 **How Resource Allocation is Extracted:**
 
-The service extracts resource allocation information from pods to send to CloudVision API:
+The service extracts resource allocation from pods and sends it to the CloudVision JobConfig API:
 
 - **Node names** (always available)
-  - Extracted from pod `spec.nodeName` field
+  - From pod `spec.nodeName`
   - Sent when `JOBCONFIG_MODE=node`
-  - Works in all Kubernetes clusters
+  - Works on every Kubernetes cluster
 
-- **Interface addresses** (requires [Multus CNI](https://github.com/k8snetworkplumbingwg/multus-cni))
-  - Extracted from `k8s.v1.cni.cncf.io/network-status` annotation added by Multus CNI
-  - MAC addresses of secondary interfaces (net1, net2, etc.) are sent when `JOBCONFIG_MODE=interface`
-  - Works with any secondary network attachment (SR-IOV, DRA, Macvlan, etc.)
+- **Interface MAC addresses** (when `JOBCONFIG_MODE=interface`)
 
-- **RDMA device info** (for logging only, requires [SR-IOV Network Device Plugin](https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin))
-  - Added to network-status annotation by SR-IOV Network Device Plugin
-  - Provides device name and PCI address for debugging logs
+  CloudVision correlates these MACs to switch ports. The informer collects MACs from both sources below, de-duplicates by MAC address, and prefers DRA device status when the same MAC appears in both.
+
+  | Source | When it applies | What is read |
+  |--------|-----------------|--------------|
+  | **DRA ResourceClaims** | Cluster allocates NICs (or extended resources backed by DRA) with a DRA driver | Driver-reported `networkData` on the claim: MAC (`hardwareAddress`), interface name, and IPs. GPU and other non-network devices are ignored. |
+  | **Multus CNI** | Pods have secondary networks attached by Multus | Secondary interfaces in the `k8s.v1.cni.cncf.io/network-status` annotation (`net1`, `net2`, …, or networks whose name includes `rdma`). The default/primary interface (`eth0`) is omitted. |
+
+  ResourceClaims are associated with a pod when the pod names the claim (including claims created from templates) or when the claim is reserved for that pod. That includes Kubernetes 1.37 extended-resource DRA, where the scheduler creates a claim that is not listed in `spec.resourceClaims`.
+
+  DRA drivers often publish MAC addresses after the pod is already Running. The informer watches ResourceClaim updates and sends a JobConfig UPDATE when the MAC list changes. If no MAC addresses are available yet, the JobConfig POST is skipped until they appear.
+
+- **RDMA device info** (logs only; [SR-IOV Network Device Plugin](https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin))
+  - Present on the Multus `network-status` annotation when that plugin is used
+  - Device name and PCI address for debug logs; not sent to CloudVision
 
 **What it needs:**
-- Read-only access to pods, nodes, and job CRDs (via RBAC)
-- Network access to CloudVision API
-- CloudVision API credentials (stored in Kubernetes secret)
+- Read access to pods, nodes, job CRDs, and ResourceClaims (via RBAC)
+- Network access to the CloudVision API
+- CloudVision API credentials (stored in a Kubernetes secret)
 
 </details>
 
@@ -428,6 +440,8 @@ The cv-interface-discovery daemonset runs one pod on each node to discover netwo
 <summary><span style="font-size: 1.5em; font-weight: bold;">Example API Payloads Sent to CloudVision</span></summary>
 
 #### JobConfig API - Job Started (JOBCONFIG_MODE=interface)
+
+`interfaces.values` is the de-duplicated list of NIC MAC addresses allocated to the job (from DRA device status, Multus `network-status`, or both). The payload shape is the same regardless of allocation mechanism.
 
 ```json
 {

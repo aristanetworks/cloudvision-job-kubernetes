@@ -41,6 +41,13 @@ from constants import (
     TERMINATION_REASON_TO_JOB_STATE,
     SUPPORTED_JOB_RESOURCES,
 )
+from dra import (
+    ResourceClaimInformer,
+    claim_key,
+    pod_uses_claim,
+    interfaces_for_pod,
+    select_interfaces,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +166,15 @@ class JobMonitor:
                 logger.warning(
                     "NodeConfig informer requested but API server/token are not configured; disabling."
                 )
+
+        # DRA ResourceClaim cache: namespace/name -> claim dict
+        self.claim_cache: Dict[str, Dict] = {}
+        self.claim_cache_lock = threading.Lock()
+        self.claim_informer = ResourceClaimInformer(
+            custom_api=self.custom_api,
+            namespace=self.watch_namespace,
+            filter_namespaces=self.filter_namespaces,
+            on_change=self._on_resource_claim_change)
 
         # Pod cache: populated by pod watch, used by job handlers
         self.pod_cache: Dict[str,
@@ -385,8 +401,57 @@ class JobMonitor:
 
         return start_time, end_time
 
+    def _on_resource_claim_change(self,
+                                  namespace: str,
+                                  name: str,
+                                  claim: Dict,
+                                  deleted: bool,
+                                  is_initial_sync: bool = False):
+        """Update ResourceClaim cache and reschedule job events when device status lands."""
+        key = claim_key(namespace, name)
+        with self.claim_cache_lock:
+            if deleted:
+                self.claim_cache.pop(key, None)
+            else:
+                self.claim_cache[key] = claim
+
+        if is_initial_sync:
+            return
+
+        with self.tracked_jobs_lock:
+            jobs = list(self.tracked_jobs.items())
+
+        for job_key, job in jobs:
+            cached_pods = self.get_cached_pods_for_job(job_key)
+            for pod in cached_pods:
+                if pod_uses_claim(pod, namespace, name, claim):
+                    self.pod_handler.schedule_job_event(job_key, job.job_name)
+                    break
+
     def _extract_network_interfaces(self,
                                     pod: client.V1Pod) -> List[InterfaceInfo]:
+        """Extract interfaces from DRA ResourceClaims, unioned with Multus."""
+        with self.claim_cache_lock:
+            dra_ifaces = interfaces_for_pod(pod, self.claim_cache)
+        multus = self._extract_multus_network_interfaces(pod)
+        chosen = select_interfaces(dra_ifaces, [{
+            "interface": iface.interface,
+            "ip": iface.ip,
+            "mac": iface.mac,
+            "rdma_device": iface.rdma_device,
+            "pci_address": iface.pci_address,
+        } for iface in multus])
+        return [
+            InterfaceInfo(interface=iface.get("interface") or "",
+                          ip=iface.get("ip"),
+                          mac=iface.get("mac"),
+                          rdma_device=iface.get("rdma_device"),
+                          pci_address=iface.get("pci_address"))
+            for iface in chosen
+        ]
+
+    def _extract_multus_network_interfaces(
+            self, pod: client.V1Pod) -> List[InterfaceInfo]:
         """Extract network interface information from pod Multus annotations."""
         # Parse network-status annotation
         metadata = getattr(pod, "metadata", None) or {}
@@ -693,6 +758,25 @@ class JobMonitor:
         if self.node_informer:
             self.node_informer.start()
 
+        # Start ResourceClaim informer before pods so the cache is warm
+        self.claim_informer.start()
+        elapsed = 0
+        while (not self.claim_informer.initial_sync_done
+               and elapsed < constants.POD_INFORMER_SYNC_MAX_WAIT):
+            time.sleep(constants.POD_INFORMER_SYNC_POLL_INTERVAL)
+            elapsed += constants.POD_INFORMER_SYNC_POLL_INTERVAL
+        if self.claim_informer.disabled:
+            logger.info(
+                "[INIT] ResourceClaim API unavailable; using Multus fallback")
+        elif self.claim_informer.initial_sync_done:
+            logger.info(
+                f"[INIT] ResourceClaim informer initial sync complete (waited {elapsed:.1f}s)"
+            )
+        else:
+            logger.warning(
+                f"ResourceClaim informer initial sync not complete after {constants.POD_INFORMER_SYNC_MAX_WAIT}s, proceeding anyway"
+            )
+
         # Start pod informer
         self.pod_informer.start()
 
@@ -737,5 +821,6 @@ class JobMonitor:
             self.pod_informer.stop()
             for informer in self.job_informers.values():
                 informer.stop()
+            self.claim_informer.stop()
             if self.node_informer:
                 self.node_informer.stop()

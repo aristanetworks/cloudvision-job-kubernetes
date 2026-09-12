@@ -125,6 +125,12 @@ SRIOV_VERSION = "v1"
 SRIOV_PLURAL = "sriovnetworknodestates"
 SRIOV_NAMESPACE = "network-operator"
 
+# DRA ResourceClaim. Prefer v1 (GA since 1.34); fall back to beta/alpha on older clusters.
+DRA_GROUP = "resource.k8s.io"
+DRA_VERSION = "v1"
+DRA_CLAIM_PLURAL = "resourceclaims"
+DRA_CLAIM_VERSIONS = ("v1", "v1beta2", "v1beta1", "v1alpha3")
+
 # ============================================================================
 # Interface Discovery Configuration
 # ============================================================================
