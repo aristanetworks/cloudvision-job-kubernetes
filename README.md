@@ -331,16 +331,15 @@ sequenceDiagram
 
 **Supported Job Resource Types:**
 
-Only the following resource types are monitored (whitelist approach). This ensures the informer only watches resources it has RBAC permissions for:
+Only the following resource types are monitored (whitelist approach). This ensures the informer only watches resources it has RBAC permissions for. The pod's **direct** owner is used (not a parent wrapper). Resource plurals are taken from the cluster API when the informer is created.
 
 | API Group | Kind | Description |
 |-----------|------|-------------|
 | `batch` | `Job` | Kubernetes batch Jobs (also used by JobSet) |
-| `kubeflow.org` | `PyTorchJob`, `TFJob`, `MPIJob`, `XGBoostJob`, `PaddleJob` | Kubeflow Training Operator |
-| `trainer.kubeflow.org` | `TrainJob` | Kubeflow Trainer v2 |
-| `argoproj.io` | `Workflow`, `WorkflowTemplate`, `CronWorkflow` | Argo Workflows |
-| `run.ai` | `RunaiJob` | Run:ai v1 API |
-| `run.ai` | `TrainingWorkload`, `InferenceWorkload`, `InteractiveWorkload` | Run:ai v2 API |
+| `kubeflow.org` | `PyTorchJob`, `TFJob`, `MPIJob`, `XGBoostJob`, `PaddleJob`, `JAXJob` | Kubeflow Training Operator |
+| `trainer.kubeflow.org` | `TrainJob` | Kubeflow Trainer v2 (pods are usually child `Job`s) |
+| `argoproj.io` | `Workflow` | Argo Workflows |
+| `run.ai` | `RunaiJob`, `TrainingWorkload`, `InferenceWorkload`, `InteractiveWorkload`, `DistributedWorkload`, `DistributedInferenceWorkload`, `ExternalWorkload`, `WorkloadRunner` | Run:ai |
 | `batch.volcano.sh` | `Job` | Volcano batch scheduler |
 | `ray.io` | `RayJob`, `RayCluster` | KubeRay |
 

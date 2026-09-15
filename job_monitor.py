@@ -41,6 +41,12 @@ from constants import (
     TERMINATION_REASON_TO_JOB_STATE,
     SUPPORTED_JOB_RESOURCES,
 )
+from discovery import (
+    api_group,
+    api_version_suffix,
+    get_json,
+    kinds_from_api_resource_list,
+)
 from dra import (
     ResourceClaimInformer,
     claim_key,
@@ -89,6 +95,9 @@ class JobMonitor:
 
         self.v1 = client.CoreV1Api()
         self.custom_api = client.CustomObjectsApi()
+        self.api_client = self.custom_api.api_client
+        self._plurals: Dict[Tuple[str, str, str], str] = {}
+        self._plural_loaded = set()
 
         # Store namespace configuration
         self.namespaces = namespaces if namespaces is not None else set()
@@ -210,32 +219,41 @@ class JobMonitor:
             filter_namespaces=self.filter_namespaces,
             handlers=pod_handlers)
 
+    def _plural_for(self, group: str, version: str, kind: str) -> str:
+        """Resolve CRD plural from the API server, else English."""
+        key = (group, version, kind)
+        if key in self._plurals:
+            return self._plurals[key]
+        loaded = (group, version)
+        if loaded not in self._plural_loaded:
+            path = f"/apis/{group}/{version}" if group else f"/api/{version}"
+            body = get_json(self.api_client, path)
+            if body:
+                for res_kind, plural in kinds_from_api_resource_list(
+                        body).items():
+                    self._plurals[(group, version, res_kind)] = plural
+            self._plural_loaded.add(loaded)
+        if key in self._plurals:
+            return self._plurals[key]
+        fallback = DynamicResourceConfig._pluralize(kind)
+        logger.warning(
+            "[DISCOVERY] No API plural for %s %s %s, using %s",
+            group or "core", version, kind, fallback)
+        self._plurals[key] = fallback
+        return fallback
+
     def _extract_parent_resource(
             self, pod: client.V1Pod) -> Optional[ParentResourceRef]:
-        """
-        Extract parent resource information from pod ownerReferences.
-
-        Returns the first owner reference that represents a supported job resource.
-        Only resources in SUPPORTED_JOB_RESOURCES whitelist are considered.
-        """
+        """First direct ownerReference that is a supported job resource."""
         if not pod.metadata.owner_references:
             return None
 
         namespace = pod.metadata.namespace
 
         for owner in pod.metadata.owner_references:
-            # Extract API group from apiVersion (e.g., "batch/v1" -> "batch")
-            # For core resources like "v1", the group is empty string
-            api_version = owner.api_version
-            if '/' in api_version:
-                api_group = api_version.split('/')[0]
-            else:
-                api_group = ""
-
-            # Only process resources in the whitelist
-            if (api_group, owner.kind) not in SUPPORTED_JOB_RESOURCES:
+            group = api_group(owner.api_version)
+            if (group, owner.kind) not in SUPPORTED_JOB_RESOURCES:
                 continue
-
             return ParentResourceRef(api_version=owner.api_version,
                                      kind=owner.kind,
                                      name=owner.name,
@@ -261,7 +279,12 @@ class JobMonitor:
         with self.discovered_types_lock:
             if type_key not in self.discovered_resource_types:
                 resource_config = DynamicResourceConfig(
-                    api_version=parent_ref.api_version, kind=parent_ref.kind)
+                    api_version=parent_ref.api_version,
+                    kind=parent_ref.kind,
+                    plural=self._plural_for(api_group(parent_ref.api_version),
+                                            api_version_suffix(
+                                                parent_ref.api_version),
+                                            parent_ref.kind))
                 self.discovered_resource_types[type_key] = resource_config
                 logger.info(
                     f"[DISCOVERY] New resource type discovered: {type_key} "

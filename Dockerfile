@@ -39,6 +39,7 @@ COPY job_handler.py .
 COPY api_utils.py .
 COPY interface_discovery.py .
 COPY dra.py .
+COPY discovery.py .
 
 # Create directory for logs
 RUN mkdir -p /logs

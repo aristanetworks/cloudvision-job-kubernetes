@@ -30,7 +30,7 @@ rules:
   verbs: ["get", "list", "watch"]
 # Permissions for Kubeflow Training Operator
 - apiGroups: ["kubeflow.org"]
-  resources: ["pytorchjobs", "tfjobs", "mpijobs", "xgboostjobs", "paddlejobs"]
+  resources: ["pytorchjobs", "tfjobs", "mpijobs", "xgboostjobs", "paddlejobs", "jaxjobs"]
   verbs: ["get", "list", "watch"]
 # Permissions for TrainJob CRD (Kubeflow Trainer v2)
 - apiGroups: ["trainer.kubeflow.org"]
@@ -38,11 +38,11 @@ rules:
   verbs: ["get", "list", "watch"]
 # Permissions for Argo Workflows
 - apiGroups: ["argoproj.io"]
-  resources: ["workflows", "workflowtemplates", "cronworkflows"]
+  resources: ["workflows"]
   verbs: ["get", "list", "watch"]
 # Permissions for Run:ai Workloads
 - apiGroups: ["run.ai"]
-  resources: ["runaijobs", "trainings", "inferences", "interactives"]
+  resources: ["runaijobs", "trainingworkloads", "trainings", "inferenceworkloads", "inferences", "interactiveworkloads", "interactives", "distributedworkloads", "distributedinferenceworkloads", "externalworkloads", "workloadrunners"]
   verbs: ["get", "list", "watch"]
 # Permissions for Volcano batch scheduler
 - apiGroups: ["batch.volcano.sh"]

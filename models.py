@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 
 SUCCESS_STATUS_VALUES = {'complete', 'completed', 'succeeded', 'jobcomplete'}
 FAIL_STATUS_VALUES = {
-    'failed', 'jobfailed', 'error', 'nodeadline', 'aborted', 'terminated'
+    'failed', 'jobfailed', 'error', 'nodeadline', 'aborted', 'terminated',
+    'stopped', 'preempted', 'deleted'
 }
 
 # ============================================================================
@@ -101,13 +102,15 @@ class DynamicResourceConfig:
     Works with any resource type without requiring code changes.
     """
 
-    def __init__(self, api_version: str, kind: str):
+    def __init__(self, api_version: str, kind: str, plural: str = None):
         """
         Initialize from apiVersion and kind (extracted from pod ownerReferences).
 
         Args:
             api_version: API version string (e.g., "batch/v1", "run.ai/v1")
             kind: Resource kind (e.g., "Job", "RunaiJob", "Workflow")
+            plural: Kubernetes resource plural. When omitted, English-pluralize
+                    kind. Prefer the cluster API resource list.
         """
         self.api_version = api_version
         self.kind = kind
@@ -119,7 +122,7 @@ class DynamicResourceConfig:
             self._group = ""
             self._version = api_version
 
-        self._plural = self._pluralize(kind)
+        self._plural = plural or self._pluralize(kind)
         self._type_key = f"{api_version}/{kind}"
 
     @staticmethod
