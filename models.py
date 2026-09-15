@@ -227,6 +227,13 @@ class DynamicResourceConfig:
         if not phase:
             phase = self._normalize_status_value(status.get('state'))
 
+        # 3. Check jobStatus (KubeRay RayJob signals completion via
+        #    status.jobStatus - PENDING/RUNNING/STOPPED/SUCCEEDED/FAILED -
+        #    and has no conditions/phase/state fields).  The value flows
+        #    through the same success/fail value sets as phase/state.
+        if not phase:
+            phase = self._normalize_status_value(status.get('jobStatus'))
+
         if phase in SUCCESS_STATUS_VALUES:
             return (True, True, False)
         if phase in FAIL_STATUS_VALUES:
