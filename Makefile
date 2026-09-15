@@ -23,6 +23,11 @@ LOG_LEVEL ?= info
 NODECONFIG_MODE ?= discovery
 NODE_INTERFACE_TYPE ?= all
 
+# Python interpreter used by the smoke target. Point it at an environment
+# that has the dependencies installed (kubernetes, requests), e.g.:
+#   make smoke PYTHON=.venv/bin/python
+PYTHON ?= python3
+
 # Image configuration
 REGISTRY ?=
 IMAGE_TAG ?= latest
@@ -62,6 +67,8 @@ help: ## Show this help message
 	@echo "                     - job = cv-job-informer deployment"
 	@echo "                     - node = cv-interface-discovery daemonset"
 	@echo "                     Used by: logs, status, restart, describe commands"
+	@echo "  PYTHON             Python interpreter for 'make smoke' (default: python3);"
+	@echo "                     must have kubernetes + requests installed"
 
 .PHONY: check-kubectl
 check-kubectl:
@@ -72,6 +79,15 @@ check-deploy-params:
 	@test -n "$(API_SERVER)" || (echo "Error: API_SERVER is required. Usage: make deploy API_SERVER=... API_TOKEN=... LOCATION=..." && exit 1)
 	@test -n "$(API_TOKEN)" || (echo "Error: API_TOKEN is required. Usage: make deploy API_SERVER=... API_TOKEN=... LOCATION=..." && exit 1)
 	@test -n "$(LOCATION)" || (echo "Error: LOCATION is required. Usage: make deploy API_SERVER=... API_TOKEN=... LOCATION=..." && exit 1)
+
+.PHONY: smoke
+smoke: ## Run unit tests (test_dra, test_discovery) and the cluster-free integration suite (no cluster needed)
+	@echo "Running unit tests..."
+	PYTHONPATH=. $(PYTHON) tests/unit/test_dra.py
+	PYTHONPATH=. $(PYTHON) tests/unit/test_discovery.py
+	@echo "Running cluster-free integration suite (fake apiserver + fake CloudVision)..."
+	PYTHONPATH=. $(PYTHON) tests/integration/test_integration.py
+	@echo "Smoke tests passed."
 
 .PHONY: deploy
 deploy: check-deploy-params ## Build and deploy to Kubernetes (requires API_SERVER, API_TOKEN, LOCATION)

@@ -1,0 +1,21 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Runtime artifacts (main.py writes job_monitor.log to the working directory)
+*.log
+
+# Local agent-team harness state (not part of the source tree)
+.agent-teams/
+
+# OS junk
+.DS_Store
+
+# Agent-facing repo context (global ignores may exclude *.md).
+!AGENTS.md
