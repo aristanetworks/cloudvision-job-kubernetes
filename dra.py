@@ -92,8 +92,10 @@ def claim_reserved_for_pod(claim: Dict,
         if not isinstance(resource, str) or resource.lower() not in ("pods", "pod"):
             continue
         uid = _get(ref, "uid")
-        if pod_uid and uid and uid == pod_uid:
-            return True
+        if pod_uid and uid:
+            if uid == pod_uid:
+                return True
+            continue
         if _get(ref, "name") == pod_name:
             return True
     return False
@@ -303,11 +305,13 @@ class ResourceClaimInformer:
                        deleted,
                        is_initial_sync=is_initial_sync)
 
-    def _sync_cache(self) -> None:
+    def _sync_cache(self, is_initial_sync: bool = True) -> None:
         from kubernetes import client
 
         try:
-            logger.info("[SYNC] ResourceClaim informer: Starting initial sync...")
+            logger.info(
+                "[SYNC] ResourceClaim informer: %s...",
+                "Starting initial sync" if is_initial_sync else "Resyncing")
             resp = None
             if not self.api_version:
                 tried = []
@@ -336,7 +340,9 @@ class ResourceClaimInformer:
             processed = 0
             for obj in items:
                 if self._should_process(obj):
-                    self._emit(obj, deleted=False, is_initial_sync=True)
+                    self._emit(obj,
+                               deleted=False,
+                               is_initial_sync=is_initial_sync)
                     processed += 1
             self.initial_sync_done = True
             logger.info(
@@ -391,7 +397,7 @@ class ResourceClaimInformer:
                         "ResourceClaim resource version expired (410), resyncing..."
                     )
                     self.initial_sync_done = False
-                    self._sync_cache()
+                    self._sync_cache(is_initial_sync=False)
                     time.sleep(1)
                 else:
                     logger.error(

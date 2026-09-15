@@ -5,8 +5,26 @@
 """Assert-based checks for CRD plural lookup and job-status heuristics."""
 
 from constants import SUPPORTED_JOB_RESOURCES
-from discovery import api_group, kinds_from_api_resource_list
+from discovery import api_group, kinds_from_api_resource_list, resolve_plural
 from models import DynamicResourceConfig
+
+
+class _FailingThenOkClient:
+    def __init__(self, body):
+        self._fails = 1
+        self._body = body if isinstance(body, bytes) else body.encode("utf-8")
+
+    def call_api(self, path, method, **kwargs):
+        if self._fails:
+            self._fails -= 1
+            raise OSError("connection refused")
+
+        class _Resp:
+            pass
+
+        resp = _Resp()
+        resp.data = self._body
+        return resp
 
 
 def test_whitelist_is_direct_owner_only():
@@ -55,9 +73,34 @@ def test_api_group():
     assert api_group("v1") == ""
 
 
+def test_plural_for_retries_after_failed_get():
+    """A failed discovery GET must not pin the English plural forever."""
+    body = b"""{
+      "kind": "APIResourceList",
+      "resources": [
+        {"name": "trainings", "kind": "TrainingWorkload", "namespaced": true}
+      ]
+    }"""
+    plurals = {}
+    loaded = set()
+    client = _FailingThenOkClient(body)
+    first = resolve_plural(client, "run.ai", "v1", "TrainingWorkload",
+                           plurals, loaded,
+                           DynamicResourceConfig._pluralize)
+    assert first == "trainingworkloads"
+    assert ("run.ai", "v1") not in loaded
+    assert ("run.ai", "v1", "TrainingWorkload") not in plurals
+    second = resolve_plural(client, "run.ai", "v1", "TrainingWorkload",
+                            plurals, loaded,
+                            DynamicResourceConfig._pluralize)
+    assert second == "trainings"
+    assert plurals[("run.ai", "v1", "TrainingWorkload")] == "trainings"
+
+
 if __name__ == "__main__":
     test_whitelist_is_direct_owner_only()
     test_server_plural_overrides_english()
     test_stopped_and_preempted_count_as_failed()
     test_api_group()
+    test_plural_for_retries_after_failed_get()
     print("ok")

@@ -44,8 +44,7 @@ from constants import (
 from discovery import (
     api_group,
     api_version_suffix,
-    get_json,
-    kinds_from_api_resource_list,
+    resolve_plural,
 )
 from dra import (
     ResourceClaimInformer,
@@ -221,26 +220,9 @@ class JobMonitor:
 
     def _plural_for(self, group: str, version: str, kind: str) -> str:
         """Resolve CRD plural from the API server, else English."""
-        key = (group, version, kind)
-        if key in self._plurals:
-            return self._plurals[key]
-        loaded = (group, version)
-        if loaded not in self._plural_loaded:
-            path = f"/apis/{group}/{version}" if group else f"/api/{version}"
-            body = get_json(self.api_client, path)
-            if body:
-                for res_kind, plural in kinds_from_api_resource_list(
-                        body).items():
-                    self._plurals[(group, version, res_kind)] = plural
-            self._plural_loaded.add(loaded)
-        if key in self._plurals:
-            return self._plurals[key]
-        fallback = DynamicResourceConfig._pluralize(kind)
-        logger.warning(
-            "[DISCOVERY] No API plural for %s %s %s, using %s",
-            group or "core", version, kind, fallback)
-        self._plurals[key] = fallback
-        return fallback
+        return resolve_plural(self.api_client, group, version, kind,
+                              self._plurals, self._plural_loaded,
+                              DynamicResourceConfig._pluralize)
 
     def _extract_parent_resource(
             self, pod: client.V1Pod) -> Optional[ParentResourceRef]:
@@ -278,13 +260,17 @@ class JobMonitor:
 
         with self.discovered_types_lock:
             if type_key not in self.discovered_resource_types:
+                group = api_group(parent_ref.api_version)
+                version = api_version_suffix(parent_ref.api_version)
+                plural = self._plural_for(group, version, parent_ref.kind)
                 resource_config = DynamicResourceConfig(
                     api_version=parent_ref.api_version,
                     kind=parent_ref.kind,
-                    plural=self._plural_for(api_group(parent_ref.api_version),
-                                            api_version_suffix(
-                                                parent_ref.api_version),
-                                            parent_ref.kind))
+                    plural=plural)
+                # GET failed: do not pin the English plural or start an
+                # informer for the wrong name. Next pod event retries.
+                if (group, version) not in self._plural_loaded:
+                    return resource_config
                 self.discovered_resource_types[type_key] = resource_config
                 logger.info(
                     f"[DISCOVERY] New resource type discovered: {type_key} "
@@ -356,31 +342,26 @@ class JobMonitor:
         Called after pod initial sync completes to ensure pod cache is populated.
         """
         with self.pending_resource_types_lock:
-            if not self.pending_resource_types:
-                logger.debug(
-                    "[DISCOVERY] No pending resource types to process")
-                return
-
-            logger.info(
-                f"[DISCOVERY] Processing {len(self.pending_resource_types)} pending resource types..."
-            )
-
-            for parent_ref in self.pending_resource_types:
-                type_key = f"{parent_ref.api_version}/{parent_ref.kind}"
-                with self.discovered_types_lock:
-                    resource_config = self.discovered_resource_types.get(
-                        type_key)
-                    if resource_config:
-                        logger.info(
-                            f"[DISCOVERY] Creating informer for queued type: {type_key}"
-                        )
-                        self._create_informer_for_resource_type(
-                            resource_config)
-
-            # Clear the queue
+            pending = list(self.pending_resource_types)
             self.pending_resource_types.clear()
-            logger.info(
-                "[DISCOVERY] Finished processing pending resource types")
+        if not pending:
+            logger.debug(
+                "[DISCOVERY] No pending resource types to process")
+            return
+
+        logger.info(
+            f"[DISCOVERY] Processing {len(pending)} pending resource types..."
+        )
+        for parent_ref in pending:
+            type_key = f"{parent_ref.api_version}/{parent_ref.kind}"
+            with self.discovered_types_lock:
+                resource_config = self.discovered_resource_types.get(type_key)
+            if resource_config:
+                logger.info(
+                    f"[DISCOVERY] Creating informer for queued type: {type_key}"
+                )
+                self._create_informer_for_resource_type(resource_config)
+        logger.info("[DISCOVERY] Finished processing pending resource types")
 
     def get_job_pods(self, job_key: str, job_name: str) -> List[client.V1Pod]:
         """Get pods for a specific job from cache (populated by pod watch)"""

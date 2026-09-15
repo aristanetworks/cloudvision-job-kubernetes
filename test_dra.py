@@ -174,6 +174,35 @@ def test_reserved_for_without_pod_claim_fields():
     assert dra[0]["interface"] == "ens21np0"
 
 
+def test_reserved_for_ignores_name_when_uids_differ():
+    """A replaced pod (same name, new uid) must not inherit the old NICs."""
+    pod = _pod()
+    pod.metadata.uid = "pod-uid-new"
+    claim = _nic_claim("dd:dd:dd:dd:dd:dd", interface="ens21np0")
+    claim["metadata"] = {"name": "generated-claim", "namespace": "default"}
+    claim["status"]["reservedFor"] = [{
+        "resource": "pods",
+        "name": "worker-0",
+        "uid": "pod-uid-old",
+    }]
+    cache = {claim_key("default", "generated-claim"): claim}
+    assert interfaces_for_pod(pod, cache) == []
+
+
+def test_reserved_for_name_match_when_reservation_has_no_uid():
+    pod = _pod()
+    pod.metadata.uid = "pod-uid-1"
+    claim = _nic_claim("ee:ee:ee:ee:ee:ee", interface="ens22np0")
+    claim["metadata"] = {"name": "generated-claim", "namespace": "default"}
+    claim["status"]["reservedFor"] = [{
+        "resource": "pods",
+        "name": "worker-0",
+    }]
+    cache = {claim_key("default", "generated-claim"): claim}
+    dra = interfaces_for_pod(pod, cache)
+    assert dra[0]["mac"] == "ee:ee:ee:ee:ee:ee"
+
+
 if __name__ == "__main__":
     test_claim_with_network_data_wins()
     test_union_keeps_extra_multus_macs()
@@ -183,4 +212,6 @@ if __name__ == "__main__":
     test_template_status_and_spec_deduped()
     test_interfaces_from_claim_skips_devices_without_mac()
     test_reserved_for_without_pod_claim_fields()
+    test_reserved_for_ignores_name_when_uids_differ()
+    test_reserved_for_name_match_when_reservation_has_no_uid()
     print("ok")

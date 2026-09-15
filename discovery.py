@@ -9,7 +9,7 @@ resource list instead.
 
 import json
 import logging
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -67,3 +67,40 @@ def get_json(api_client, path: str) -> Optional[Dict]:
     except Exception as exc:
         logger.info("[DISCOVERY] GET %s failed: %s", path, exc)
         return None
+
+
+def resolve_plural(api_client,
+                   group: str,
+                   version: str,
+                   kind: str,
+                   plurals: Dict[Tuple[str, str, str], str],
+                   loaded: Set[Tuple[str, str]],
+                   english_plural: Callable[[str], str]) -> str:
+    """Kind -> CRD plural from the API resource list, else English.
+
+    A failed GET is not cached: the next lookup retries. English is stored
+    only after a successful list that omits this kind.
+    """
+    key = (group, version, kind)
+    if key in plurals:
+        return plurals[key]
+    gv = (group, version)
+    if gv not in loaded:
+        path = f"/apis/{group}/{version}" if group else f"/api/{version}"
+        body = get_json(api_client, path)
+        if not body:
+            fallback = english_plural(kind)
+            logger.warning(
+                "[DISCOVERY] GET failed for %s %s %s, using %s (not cached)",
+                group or "core", version, kind, fallback)
+            return fallback
+        for res_kind, plural in kinds_from_api_resource_list(body).items():
+            plurals[(group, version, res_kind)] = plural
+        loaded.add(gv)
+    if key in plurals:
+        return plurals[key]
+    fallback = english_plural(kind)
+    logger.warning("[DISCOVERY] No API plural for %s %s %s, using %s",
+                   group or "core", version, kind, fallback)
+    plurals[key] = fallback
+    return fallback
