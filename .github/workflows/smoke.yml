@@ -1,0 +1,31 @@
+name: Smoke Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'  # matches the Dockerfile pin
+
+      - name: Install test dependencies
+        # cryptography generates the CV stub's TLS identity per run (also a
+        # kubernetes transitive dep via google-auth; named explicitly here).
+        run: pip install kubernetes requests cryptography
+
+      - name: Run smoke tests (unit + cluster-free integration)
+        run: make smoke
