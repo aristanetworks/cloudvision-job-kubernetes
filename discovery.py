@@ -44,7 +44,13 @@ def kinds_from_api_resource_list(body: Dict) -> Dict[str, str]:
 
 
 def get_json(api_client, path: str) -> Optional[Dict]:
-    """GET a Kubernetes discovery document. None on failure."""
+    """GET a Kubernetes discovery document. None on failure.
+
+    Tolerates both kubernetes-client return conventions for
+    call_api(..., _preload_content=False): clients < 36 return the
+    (response, status, headers) tuple, clients >= 36 return the bare
+    urllib3 HTTPResponse.  Both carry the body on response.data.
+    """
     try:
         resp = api_client.call_api(
             path,
@@ -52,7 +58,8 @@ def get_json(api_client, path: str) -> Optional[Dict]:
             auth_settings=["BearerToken"],
             _preload_content=False,
         )
-        raw = resp[0].data
+        response = resp[0] if isinstance(resp, tuple) else resp
+        raw = response.data
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")
         data = json.loads(raw)
