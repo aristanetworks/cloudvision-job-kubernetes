@@ -302,7 +302,17 @@ class JobMonitor:
                     # Create and start informer immediately (normal operation)
                     self._create_informer_for_resource_type(resource_config)
 
-            return self.discovered_resource_types[type_key]
+            resource_config = self.discovered_resource_types[type_key]
+
+        # A type discovered during a slow pod initial sync can still be
+        # sitting in the deferred queue after run() drained it once.  A live
+        # pod event for such a type must not rely on the queue: create the
+        # missing informer now.  (Idempotent: _create_informer... skips
+        # types that already have an informer.)
+        if not defer_informer and type_key not in self.job_informers:
+            self._create_informer_for_resource_type(resource_config)
+
+        return resource_config
 
     def _create_informer_for_resource_type(
             self, resource_config: DynamicResourceConfig):
@@ -832,6 +842,19 @@ class JobMonitor:
         try:
             while True:
                 time.sleep(1)
+
+                # Re-drain the deferred-informer queue: a slow pod initial
+                # sync can discover types AFTER the one-time drain above;
+                # those entries would otherwise be stranded and their jobs
+                # never reported.  Draining is safe at any point after the
+                # initial-sync barrier (the pod cache is populated).
+                with self.pending_resource_types_lock:
+                    has_pending_types = bool(self.pending_resource_types)
+                if has_pending_types:
+                    logger.info(
+                        "[DISCOVERY] Deferred resource types found after "
+                        "startup; creating their informers now")
+                    self._process_pending_resource_types()
 
                 # Periodic cleanup of old finished jobs
                 if time.time(
