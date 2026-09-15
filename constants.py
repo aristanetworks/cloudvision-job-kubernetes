@@ -76,13 +76,14 @@ TERMINATION_REASON_TO_JOB_STATE = {
 # Supported Job Resource Types (Whitelist)
 # ============================================================================
 # Only these resource types will be monitored as job resources.
-# The key is (apiGroup, kind) tuple, matching the RBAC permissions in deployment.yaml.
+# The key is (apiGroup, kind) tuple, matching the RBAC permissions in job_informer.yaml.
 # To add support for additional resource types:
-#   1. Add RBAC permissions in deployment.yaml
+#   1. Add RBAC permissions in job_informer.yaml
 #   2. Add the (apiGroup, kind) tuple to this set
 #
 # Note: apiGroup is the API group (e.g., "batch", "kubeflow.org"), not the full apiVersion.
 #       For core resources, use empty string "" as the apiGroup.
+# Resource plurals are resolved from the cluster API when an informer is created.
 SUPPORTED_JOB_RESOURCES = {
     # Kubernetes batch Jobs (also created by JobSet, so JobSet jobs are tracked via their child Jobs)
     ("batch", "Job"),
@@ -92,17 +93,20 @@ SUPPORTED_JOB_RESOURCES = {
     ("kubeflow.org", "MPIJob"),
     ("kubeflow.org", "XGBoostJob"),
     ("kubeflow.org", "PaddleJob"),
+    ("kubeflow.org", "JAXJob"),
     # Kubeflow Trainer v2
     ("trainer.kubeflow.org", "TrainJob"),
     # Argo Workflows
     ("argoproj.io", "Workflow"),
-    ("argoproj.io", "WorkflowTemplate"),
-    ("argoproj.io", "CronWorkflow"),
-    # Run:ai Workloads
+    # Run:ai
     ("run.ai", "RunaiJob"),
     ("run.ai", "TrainingWorkload"),
     ("run.ai", "InferenceWorkload"),
     ("run.ai", "InteractiveWorkload"),
+    ("run.ai", "DistributedWorkload"),
+    ("run.ai", "DistributedInferenceWorkload"),
+    ("run.ai", "ExternalWorkload"),
+    ("run.ai", "WorkloadRunner"),
     # Volcano batch scheduler
     ("batch.volcano.sh", "Job"),
     # KubeRay
@@ -124,6 +128,12 @@ SRIOV_GROUP = "sriovnetwork.openshift.io"
 SRIOV_VERSION = "v1"
 SRIOV_PLURAL = "sriovnetworknodestates"
 SRIOV_NAMESPACE = "network-operator"
+
+# DRA ResourceClaim. Prefer v1 (GA since 1.34); fall back to beta/alpha on older clusters.
+DRA_GROUP = "resource.k8s.io"
+DRA_VERSION = "v1"
+DRA_CLAIM_PLURAL = "resourceclaims"
+DRA_CLAIM_VERSIONS = ("v1", "v1beta2", "v1beta1", "v1alpha3")
 
 # ============================================================================
 # Interface Discovery Configuration

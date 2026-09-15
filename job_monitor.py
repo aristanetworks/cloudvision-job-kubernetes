@@ -41,6 +41,18 @@ from constants import (
     TERMINATION_REASON_TO_JOB_STATE,
     SUPPORTED_JOB_RESOURCES,
 )
+from discovery import (
+    api_group,
+    api_version_suffix,
+    resolve_plural,
+)
+from dra import (
+    ResourceClaimInformer,
+    claim_key,
+    pod_uses_claim,
+    interfaces_for_pod,
+    select_interfaces,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +94,9 @@ class JobMonitor:
 
         self.v1 = client.CoreV1Api()
         self.custom_api = client.CustomObjectsApi()
+        self.api_client = self.custom_api.api_client
+        self._plurals: Dict[Tuple[str, str, str], str] = {}
+        self._plural_loaded = set()
 
         # Store namespace configuration
         self.namespaces = namespaces if namespaces is not None else set()
@@ -160,6 +175,15 @@ class JobMonitor:
                     "NodeConfig informer requested but API server/token are not configured; disabling."
                 )
 
+        # DRA ResourceClaim cache: namespace/name -> claim dict
+        self.claim_cache: Dict[str, Dict] = {}
+        self.claim_cache_lock = threading.Lock()
+        self.claim_informer = ResourceClaimInformer(
+            custom_api=self.custom_api,
+            namespace=self.watch_namespace,
+            filter_namespaces=self.filter_namespaces,
+            on_change=self._on_resource_claim_change)
+
         # Pod cache: populated by pod watch, used by job handlers
         self.pod_cache: Dict[str,
                              client.V1Pod] = {}  # pod_name -> V1Pod object
@@ -194,32 +218,24 @@ class JobMonitor:
             filter_namespaces=self.filter_namespaces,
             handlers=pod_handlers)
 
+    def _plural_for(self, group: str, version: str, kind: str) -> str:
+        """Resolve CRD plural from the API server, else English."""
+        return resolve_plural(self.api_client, group, version, kind,
+                              self._plurals, self._plural_loaded,
+                              DynamicResourceConfig._pluralize)
+
     def _extract_parent_resource(
             self, pod: client.V1Pod) -> Optional[ParentResourceRef]:
-        """
-        Extract parent resource information from pod ownerReferences.
-
-        Returns the first owner reference that represents a supported job resource.
-        Only resources in SUPPORTED_JOB_RESOURCES whitelist are considered.
-        """
+        """First direct ownerReference that is a supported job resource."""
         if not pod.metadata.owner_references:
             return None
 
         namespace = pod.metadata.namespace
 
         for owner in pod.metadata.owner_references:
-            # Extract API group from apiVersion (e.g., "batch/v1" -> "batch")
-            # For core resources like "v1", the group is empty string
-            api_version = owner.api_version
-            if '/' in api_version:
-                api_group = api_version.split('/')[0]
-            else:
-                api_group = ""
-
-            # Only process resources in the whitelist
-            if (api_group, owner.kind) not in SUPPORTED_JOB_RESOURCES:
+            group = api_group(owner.api_version)
+            if (group, owner.kind) not in SUPPORTED_JOB_RESOURCES:
                 continue
-
             return ParentResourceRef(api_version=owner.api_version,
                                      kind=owner.kind,
                                      name=owner.name,
@@ -244,8 +260,17 @@ class JobMonitor:
 
         with self.discovered_types_lock:
             if type_key not in self.discovered_resource_types:
+                group = api_group(parent_ref.api_version)
+                version = api_version_suffix(parent_ref.api_version)
+                plural = self._plural_for(group, version, parent_ref.kind)
                 resource_config = DynamicResourceConfig(
-                    api_version=parent_ref.api_version, kind=parent_ref.kind)
+                    api_version=parent_ref.api_version,
+                    kind=parent_ref.kind,
+                    plural=plural)
+                # GET failed: do not pin the English plural or start an
+                # informer for the wrong name. Next pod event retries.
+                if (group, version) not in self._plural_loaded:
+                    return resource_config
                 self.discovered_resource_types[type_key] = resource_config
                 logger.info(
                     f"[DISCOVERY] New resource type discovered: {type_key} "
@@ -263,7 +288,17 @@ class JobMonitor:
                     # Create and start informer immediately (normal operation)
                     self._create_informer_for_resource_type(resource_config)
 
-            return self.discovered_resource_types[type_key]
+            resource_config = self.discovered_resource_types[type_key]
+
+        # A type discovered during a slow pod initial sync can still be
+        # sitting in the deferred queue after run() drained it once.  A live
+        # pod event for such a type must not rely on the queue: create the
+        # missing informer now.  (Idempotent: _create_informer... skips
+        # types that already have an informer.)
+        if not defer_informer and type_key not in self.job_informers:
+            self._create_informer_for_resource_type(resource_config)
+
+        return resource_config
 
     def _create_informer_for_resource_type(
             self, resource_config: DynamicResourceConfig):
@@ -307,31 +342,26 @@ class JobMonitor:
         Called after pod initial sync completes to ensure pod cache is populated.
         """
         with self.pending_resource_types_lock:
-            if not self.pending_resource_types:
-                logger.debug(
-                    "[DISCOVERY] No pending resource types to process")
-                return
-
-            logger.info(
-                f"[DISCOVERY] Processing {len(self.pending_resource_types)} pending resource types..."
-            )
-
-            for parent_ref in self.pending_resource_types:
-                type_key = f"{parent_ref.api_version}/{parent_ref.kind}"
-                with self.discovered_types_lock:
-                    resource_config = self.discovered_resource_types.get(
-                        type_key)
-                    if resource_config:
-                        logger.info(
-                            f"[DISCOVERY] Creating informer for queued type: {type_key}"
-                        )
-                        self._create_informer_for_resource_type(
-                            resource_config)
-
-            # Clear the queue
+            pending = list(self.pending_resource_types)
             self.pending_resource_types.clear()
-            logger.info(
-                "[DISCOVERY] Finished processing pending resource types")
+        if not pending:
+            logger.debug(
+                "[DISCOVERY] No pending resource types to process")
+            return
+
+        logger.info(
+            f"[DISCOVERY] Processing {len(pending)} pending resource types..."
+        )
+        for parent_ref in pending:
+            type_key = f"{parent_ref.api_version}/{parent_ref.kind}"
+            with self.discovered_types_lock:
+                resource_config = self.discovered_resource_types.get(type_key)
+            if resource_config:
+                logger.info(
+                    f"[DISCOVERY] Creating informer for queued type: {type_key}"
+                )
+                self._create_informer_for_resource_type(resource_config)
+        logger.info("[DISCOVERY] Finished processing pending resource types")
 
     def get_job_pods(self, job_key: str, job_name: str) -> List[client.V1Pod]:
         """Get pods for a specific job from cache (populated by pod watch)"""
@@ -385,8 +415,62 @@ class JobMonitor:
 
         return start_time, end_time
 
+    def _on_resource_claim_change(self,
+                                  namespace: str,
+                                  name: str,
+                                  claim: Dict,
+                                  deleted: bool,
+                                  is_initial_sync: bool = False):
+        """Update ResourceClaim cache and reschedule job events when device status lands.
+
+        Initial-sync emits also reschedule: if a pod was already processed
+        while the claim cache was still cold (claim sync slower than the
+        startup barrier, or a transient sync failure), the late cache
+        warm-up must re-evaluate the affected jobs or their STARTED/UPDATE
+        events never fire.  On a normal startup tracked_jobs is still empty
+        here, so the loop is a no-op.
+        """
+        key = claim_key(namespace, name)
+        with self.claim_cache_lock:
+            if deleted:
+                self.claim_cache.pop(key, None)
+            else:
+                self.claim_cache[key] = claim
+
+        with self.tracked_jobs_lock:
+            jobs = list(self.tracked_jobs.items())
+
+        for job_key, job in jobs:
+            cached_pods = self.get_cached_pods_for_job(job_key)
+            for pod in cached_pods:
+                if pod_uses_claim(pod, namespace, name, claim):
+                    self.pod_handler.schedule_job_event(job_key, job.job_name)
+                    break
+
     def _extract_network_interfaces(self,
                                     pod: client.V1Pod) -> List[InterfaceInfo]:
+        """Extract interfaces from DRA ResourceClaims, unioned with Multus."""
+        with self.claim_cache_lock:
+            dra_ifaces = interfaces_for_pod(pod, self.claim_cache)
+        multus = self._extract_multus_network_interfaces(pod)
+        chosen = select_interfaces(dra_ifaces, [{
+            "interface": iface.interface,
+            "ip": iface.ip,
+            "mac": iface.mac,
+            "rdma_device": iface.rdma_device,
+            "pci_address": iface.pci_address,
+        } for iface in multus])
+        return [
+            InterfaceInfo(interface=iface.get("interface") or "",
+                          ip=iface.get("ip"),
+                          mac=iface.get("mac"),
+                          rdma_device=iface.get("rdma_device"),
+                          pci_address=iface.get("pci_address"))
+            for iface in chosen
+        ]
+
+    def _extract_multus_network_interfaces(
+            self, pod: client.V1Pod) -> List[InterfaceInfo]:
         """Extract network interface information from pod Multus annotations."""
         # Parse network-status annotation
         metadata = getattr(pod, "metadata", None) or {}
@@ -693,6 +777,27 @@ class JobMonitor:
         if self.node_informer:
             self.node_informer.start()
 
+        # Start ResourceClaim informer before pods so the cache is warm
+        self.claim_informer.start()
+        claim_deadline = time.monotonic() + constants.POD_INFORMER_SYNC_MAX_WAIT
+        while (not self.claim_informer.initial_sync_done
+               and time.monotonic() < claim_deadline):
+            time.sleep(constants.POD_INFORMER_SYNC_POLL_INTERVAL)
+        claim_waited = max(
+            0.0, constants.POD_INFORMER_SYNC_MAX_WAIT -
+            (claim_deadline - time.monotonic()))
+        if self.claim_informer.disabled:
+            logger.info(
+                "[INIT] ResourceClaim API unavailable; using Multus fallback")
+        elif self.claim_informer.initial_sync_done:
+            logger.info(
+                f"[INIT] ResourceClaim informer initial sync complete (waited {claim_waited:.1f}s)"
+            )
+        else:
+            logger.warning(
+                f"ResourceClaim informer initial sync not complete after {constants.POD_INFORMER_SYNC_MAX_WAIT}s, proceeding anyway"
+            )
+
         # Start pod informer
         self.pod_informer.start()
 
@@ -701,15 +806,17 @@ class JobMonitor:
         logger.info(
             "[INIT] Waiting for pod informer initial sync to complete before starting job informers..."
         )
-        elapsed = 0
-
-        while not self.pod_informer.initial_sync_done and elapsed < constants.POD_INFORMER_SYNC_MAX_WAIT:
+        pod_deadline = time.monotonic() + constants.POD_INFORMER_SYNC_MAX_WAIT
+        while (not self.pod_informer.initial_sync_done
+               and time.monotonic() < pod_deadline):
             time.sleep(constants.POD_INFORMER_SYNC_POLL_INTERVAL)
-            elapsed += constants.POD_INFORMER_SYNC_POLL_INTERVAL
+        pod_waited = max(
+            0.0, constants.POD_INFORMER_SYNC_MAX_WAIT -
+            (pod_deadline - time.monotonic()))
 
         if self.pod_informer.initial_sync_done:
             logger.info(
-                f"[INIT] Pod informer initial sync complete (waited {elapsed:.1f}s)"
+                f"[INIT] Pod informer initial sync complete (waited {pod_waited:.1f}s)"
             )
         else:
             logger.warning(
@@ -726,6 +833,19 @@ class JobMonitor:
             while True:
                 time.sleep(1)
 
+                # Re-drain the deferred-informer queue: a slow pod initial
+                # sync can discover types AFTER the one-time drain above;
+                # those entries would otherwise be stranded and their jobs
+                # never reported.  Draining is safe at any point after the
+                # initial-sync barrier (the pod cache is populated).
+                with self.pending_resource_types_lock:
+                    has_pending_types = bool(self.pending_resource_types)
+                if has_pending_types:
+                    logger.info(
+                        "[DISCOVERY] Deferred resource types found after "
+                        "startup; creating their informers now")
+                    self._process_pending_resource_types()
+
                 # Periodic cleanup of old finished jobs
                 if time.time(
                 ) - last_cleanup >= constants.FINISHED_JOBS_CLEANUP_INTERVAL:
@@ -737,5 +857,6 @@ class JobMonitor:
             self.pod_informer.stop()
             for informer in self.job_informers.values():
                 informer.stop()
+            self.claim_informer.stop()
             if self.node_informer:
                 self.node_informer.stop()

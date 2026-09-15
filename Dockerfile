@@ -23,6 +23,9 @@ RUN apt-get update && \
   && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies directly
+# kubernetes>=28: discovery.get_json tolerates both call_api return
+# conventions ((resp, status, headers) tuple for clients < 36, bare
+# HTTPResponse for >= 36), so the whole range resolves CRD plurals correctly.
 RUN pip install --no-cache-dir \
   kubernetes>=28.0.0 \
   requests>=2.31.0 \
@@ -38,6 +41,8 @@ COPY pod_handler.py .
 COPY job_handler.py .
 COPY api_utils.py .
 COPY interface_discovery.py .
+COPY dra.py .
+COPY discovery.py .
 
 # Create directory for logs
 RUN mkdir -p /logs

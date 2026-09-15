@@ -6,7 +6,7 @@ metadata:
   name: cv-job-informer
   namespace: cloudvision
 ---
-# ClusterRole with permissions to watch jobs, pods, and SR-IOV node states
+# ClusterRole with permissions to watch jobs, pods, DRA claims, and node states
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -30,7 +30,7 @@ rules:
   verbs: ["get", "list", "watch"]
 # Permissions for Kubeflow Training Operator
 - apiGroups: ["kubeflow.org"]
-  resources: ["pytorchjobs", "tfjobs", "mpijobs", "xgboostjobs", "paddlejobs"]
+  resources: ["pytorchjobs", "tfjobs", "mpijobs", "xgboostjobs", "paddlejobs", "jaxjobs"]
   verbs: ["get", "list", "watch"]
 # Permissions for TrainJob CRD (Kubeflow Trainer v2)
 - apiGroups: ["trainer.kubeflow.org"]
@@ -38,11 +38,11 @@ rules:
   verbs: ["get", "list", "watch"]
 # Permissions for Argo Workflows
 - apiGroups: ["argoproj.io"]
-  resources: ["workflows", "workflowtemplates", "cronworkflows"]
+  resources: ["workflows"]
   verbs: ["get", "list", "watch"]
 # Permissions for Run:ai Workloads
 - apiGroups: ["run.ai"]
-  resources: ["runaijobs", "trainings", "inferences", "interactives"]
+  resources: ["runaijobs", "trainingworkloads", "trainings", "inferenceworkloads", "inferences", "interactiveworkloads", "interactives", "distributedworkloads", "distributedinferenceworkloads", "externalworkloads", "workloadrunners"]
   verbs: ["get", "list", "watch"]
 # Permissions for Volcano batch scheduler
 - apiGroups: ["batch.volcano.sh"]
@@ -62,6 +62,10 @@ rules:
 # Permissions for SR-IOV Network Node States (SR-IOV Operator fallback)
 - apiGroups: ["sriovnetwork.openshift.io"]
   resources: ["sriovnetworknodestates"]
+  verbs: ["get", "list", "watch"]
+# Permissions for DRA ResourceClaims (Kubernetes 1.32+ / 1.37 device status)
+- apiGroups: ["resource.k8s.io"]
+  resources: ["resourceclaims"]
   verbs: ["get", "list", "watch"]
 ---
 # ClusterRoleBinding to bind the cluster role to the service account
